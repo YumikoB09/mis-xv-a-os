@@ -1,0 +1,290 @@
+// src/App.jsx
+import React, { useEffect, useState, useRef } from "react";
+
+/*
+  Firebase modular SDK (v9+)
+  Asegúrate de instalar: npm install firebase
+*/
+import { initializeApp } from "firebase/app";
+import {
+  getStorage,
+  ref as storageRef,
+  uploadBytesResumable,
+  getDownloadURL,
+} from "firebase/storage";
+import {
+  getFirestore,
+  collection,
+  addDoc,
+  onSnapshot,
+  query,
+  orderBy,
+  doc,
+  updateDoc,
+  increment,
+  serverTimestamp,
+} from "firebase/firestore";
+
+/* ======================================================
+   CONFIGURACIÓN DE FIREBASE
+   Reemplaza los valores con tus credenciales reales.
+   (Las claves las obtienes desde la consola Firebase)
+   ====================================================== */
+const firebaseConfig = {
+  apiKey: "TU_API_KEY",
+  authDomain: "TU_AUTH_DOMAIN",
+  projectId: "TU_PROJECT_ID",
+  storageBucket: "TU_STORAGE_BUCKET",
+  messagingSenderId: "TU_MESSAGING_SENDER_ID",
+  appId: "TU_APP_ID",
+};
+
+const app = initializeApp(firebaseConfig);
+const storage = getStorage(app);
+const db = getFirestore(app);
+
+/* ======================================================
+   APP PRINCIPAL
+   - Subida a Firebase Storage
+   - Metadatos en Firestore (colección "album")
+   - Galería con tarjetas (fotos y videos)
+   - Sistema de "estrellas" (contador) guardado en Firestore
+   - Tema: Señora de la Luna (colores oscuros, azul, violeta, plateado)
+   ====================================================== */
+export default function App() {
+  const [items, setItems] = useState([]); // elementos del álbum
+  const [uploadProgress, setUploadProgress] = useState(0); // progreso %
+  const [message, setMessage] = useState(""); // mensajes cortos al usuario
+  const fileInputRef = useRef(null);
+
+  // Suscripción en tiempo real a la colección "album"
+  useEffect(() => {
+    const q = query(collection(db, "album"), orderBy("createdAt", "desc"));
+    const unsub = onSnapshot(q, (snapshot) => {
+      const arr = snapshot.docs.map((docSnap) => ({
+        id: docSnap.id,
+        ...docSnap.data(),
+      }));
+      setItems(arr);
+    });
+    return () => unsub();
+  }, []);
+
+  // Formato legible de fecha/hora
+  function niceDate(ts) {
+    if (!ts) return "";
+    const d = ts.toDate ? ts.toDate() : new Date(ts);
+    return d.toLocaleString();
+  }
+
+  /* ------------------------------------------------------
+     Sube un File (imagen/video) a Firebase Storage y crea
+     un doc en Firestore con metadata (url, tipo, tamaño, stars)
+     ------------------------------------------------------ */
+  async function handleFileUpload(file) {
+    if (!file) return;
+    try {
+      setMessage("");
+      setUploadProgress(0);
+
+      const timestamp = Date.now();
+      const safeName = `${timestamp}_${file.name}`;
+      const storagePath = `quince/${safeName}`;
+      const sRef = storageRef(storage, storagePath);
+
+      const uploadTask = uploadBytesResumable(sRef, file);
+
+      uploadTask.on(
+        "state_changed",
+        (snapshot) => {
+          const progress =
+            (snapshot.bytesTransferred / snapshot.totalBytes) * 100;
+          setUploadProgress(Math.round(progress));
+        },
+        (error) => {
+          console.error("Error subida:", error);
+          setMessage("Error al subir el archivo.");
+          setUploadProgress(0);
+        },
+        async () => {
+          const downloadURL = await getDownloadURL(uploadTask.snapshot.ref);
+          // Guardar metadata en Firestore
+          await addDoc(collection(db, "album"), {
+            name: file.name,
+            url: downloadURL,
+            type: file.type,
+            size: file.size,
+            createdAt: serverTimestamp(),
+            stars: 0,
+            storagePath,
+          });
+
+          setMessage("Subida completada ✅");
+          setTimeout(() => setMessage(""), 2500);
+          setUploadProgress(0);
+        }
+      );
+    } catch (err) {
+      console.error(err);
+      setMessage("Ocurrió un error.");
+      setUploadProgress(0);
+    }
+  }
+
+  // Handler del input file
+  function onFileChange(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    handleFileUpload(file);
+    // limpiar valor para permitir subir el mismo archivo otra vez
+    e.target.value = null;
+  }
+
+  // Abrir selector de archivos al pulsar botón
+  function openFilePicker() {
+    fileInputRef.current?.click();
+  }
+
+  // Dar una estrella (incrementa contador en Firestore)
+  async function giveStar(itemId) {
+    try {
+      const docRef = doc(db, "album", itemId);
+      await updateDoc(docRef, { stars: increment(1) });
+    } catch (err) {
+      console.error("Error al dar estrella:", err);
+      setMessage("No se pudo registrar la calificación.");
+      setTimeout(() => setMessage(""), 2000);
+    }
+  }
+
+  // Tarjeta que representa cada elemento (foto o video)
+  function MediaCard({ item }) {
+    const isVideo = item.type && item.type.startsWith("video");
+    return (
+      <div className="bg-slate-800 rounded-2xl shadow-md overflow-hidden flex flex-col">
+        <div className="w-full h-56 bg-slate-900 flex items-center justify-center">
+          {isVideo ? (
+            <video
+              src={item.url}
+              controls
+              className="w-full h-full object-cover"
+              preload="metadata"
+            />
+          ) : (
+            <img
+              src={item.url}
+              alt={item.name || "foto"}
+              className="w-full h-full object-cover"
+            />
+          )}
+        </div>
+
+        <div className="p-3 flex flex-col gap-2">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium text-indigo-300">
+                {item.name || "Archivo"}
+              </p>
+              <p className="text-xs text-gray-400">{niceDate(item.createdAt)}</p>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => giveStar(item.id)}
+                className="flex items-center gap-1 px-3 py-1 rounded-full bg-gradient-to-r from-yellow-400 to-yellow-500 text-black text-sm shadow-sm"
+                aria-label={`Dar estrella a ${item.name}`}
+              >
+                <span className="text-lg">⭐</span>
+                <span className="font-medium">{item.stars ?? 0}</span>
+              </button>
+            </div>
+          </div>
+
+          <div className="text-xs text-gray-400 truncate">
+            {isVideo ? "Video" : "Foto"} • {Math.round((item.size ?? 0) / 1024)} KB
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Render principal
+  return (
+    <div className="min-h-screen bg-gradient-to-b from-slate-900 via-indigo-950 to-black flex flex-col items-center p-4">
+      {/* HEADER */}
+      <header className="w-full max-w-md">
+        <div className="bg-slate-800/60 backdrop-blur-sm rounded-3xl p-4 flex items-center gap-3 shadow-lg">
+          <div className="w-12 h-12 rounded-full bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center text-white text-2xl font-bold">
+            🌙
+          </div>
+          <div>
+            <h1 className="text-lg font-bold text-indigo-200">
+              Álbum — Señora de la Luna
+            </h1>
+            <p className="text-xs text-gray-400">Acceso por QR • Sube fotos y videos</p>
+          </div>
+        </div>
+      </header>
+
+      {/* AREA DE SUBIDA */}
+      <main className="w-full max-w-md mt-4">
+        <div className="bg-slate-800 rounded-3xl p-4 shadow-md">
+          <p className="text-sm text-slate-200 mb-3">
+            Comparte un recuerdo lunar: toma una foto/video o súbelo desde tu galería.
+          </p>
+
+          <div className="flex gap-3">
+            <button
+              onClick={openFilePicker}
+              className="flex-1 px-4 py-3 rounded-xl bg-gradient-to-r from-indigo-500 to-violet-600 text-white font-semibold shadow hover:scale-[1.01] transition transform"
+            >
+              📸 Subir foto / video
+            </button>
+
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*,video/*"
+              capture="environment"
+              onChange={onFileChange}
+              className="hidden"
+            />
+
+            <div className="w-20 flex items-center justify-center">
+              {uploadProgress > 0 ? (
+                <div className="text-xs text-gray-300">{uploadProgress}%</div>
+              ) : (
+                <div className="text-xs text-gray-500">—</div>
+              )}
+            </div>
+          </div>
+
+          {message && (
+            <div className="mt-3 text-xs text-center text-green-400">{message}</div>
+          )}
+        </div>
+
+        {/* GALERÍA */}
+        <section className="mt-4">
+          <h2 className="text-sm font-semibold text-indigo-300 mb-2">Galería</h2>
+
+          {items.length === 0 ? (
+            <div className="bg-slate-800 rounded-2xl p-6 text-center text-gray-400 shadow-sm">
+              Aún no hay recuerdos lunares. ¡Sé el/la primero/a en compartir! 🌌
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 gap-3">
+              {items.map((item) => (
+                <MediaCard key={item.id} item={item} />
+              ))}
+            </div>
+          )}
+        </section>
+
+        <footer className="mt-6 text-center text-xs text-gray-500">
+          Fiesta temática • Señora de la Luna 🌙
+        </footer>
+      </main>
+    </div>
+  );
+}
